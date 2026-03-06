@@ -214,34 +214,35 @@ aws fsx create-storage-virtual-machine \
     --root-volume-security-style UNIX
 ```
 
-Then create volumes via ONTAP CLI. Note: On managed FSxN, omit the `-aggregate` parameter — the service assigns aggregates automatically.
+Then create volumes via ONTAP CLI. Note: To run ONTAP CLI, you have to aceess FSxN management endpoint with "fsxadmin" user.
 
 ```bash
 # On AZ1 FSxN — Origin volume (training data)
 volume create -vserver svm-primary -volume training_data \
     -size 5t -junction-path /training-data \
-    -security-style unix -unix-permissions 0755
+    -security-style unix -unix-permissions 0755 -aggregate aggr1
 
 # On AZ1 FSxN — Local checkpoint volume
 volume create -vserver svm-primary -volume checkpoints_az1 \
     -size 1t -junction-path /checkpoints-az1 \
-    -security-style unix -unix-permissions 0777
+    -security-style unix -unix-permissions 0777 -aggregate aggr1
 
 # On AZ1 FSxN — AZ2 checkpoint replica volume (SnapMirror destination)
 # Note: DP volumes cannot have a junction-path at creation.
 # The volume remains unmounted until accessed via FlexClone or mirror break.
 volume create -vserver svm-primary -volume checkpoints_az2_replica \
-    -size 1t -type DP
+    -size 1t -type DP -aggregate aggr1
 
 # On AZ2 FSxN — Local checkpoint volume
 volume create -vserver svm-cache -volume checkpoints_az2 \
     -size 1t -junction-path /checkpoints-az2 \
-    -security-style unix -unix-permissions 0777
+    -security-style unix -unix-permissions 0777 -aggregate aggr1
 ```
 
 ### Step 3: Configure Security Groups for Cross-AZ Communication
 
 Before establishing cluster peering, ensure the VPC security groups for both FSxN file systems allow cross-AZ intercluster traffic:
+You can find FSxN cluster's security group using attached ENI-ID.
 
 ```bash
 # Allow intercluster communication between AZ1 and AZ2 FSxN
@@ -251,29 +252,29 @@ Before establishing cluster peering, ensure the VPC security groups for both FSx
 #   - ICMP (cluster peering health checks)
 
 aws ec2 authorize-security-group-ingress \
-    --group-id sg-fsxn-az1 \
-    --protocol tcp --port 11104 --source-group sg-fsxn-az2
+    --group-id <sg-fsxn-az1> \
+    --protocol tcp --port 11104 --source-group <sg-fsxn-az2>
 
 aws ec2 authorize-security-group-ingress \
-    --group-id sg-fsxn-az1 \
-    --protocol tcp --port 11105 --source-group sg-fsxn-az2
+    --group-id <sg-fsxn-az1> \
+    --protocol tcp --port 11105 --source-group <sg-fsxn-az2>
 
 aws ec2 authorize-security-group-ingress \
-    --group-id sg-fsxn-az1 \
-    --protocol icmp --port -1 --source-group sg-fsxn-az2
+    --group-id <sg-fsxn-az1> \
+    --protocol icmp --port -1 --source-group <sg-fsxn-az2>
 
 # Repeat in reverse direction (AZ2 allowing AZ1)
 aws ec2 authorize-security-group-ingress \
-    --group-id sg-fsxn-az2 \
-    --protocol tcp --port 11104 --source-group sg-fsxn-az1
+    --group-id <sg-fsxn-az2> \
+    --protocol tcp --port 11104 --source-group <sg-fsxn-az1>
 
 aws ec2 authorize-security-group-ingress \
-    --group-id sg-fsxn-az2 \
-    --protocol tcp --port 11105 --source-group sg-fsxn-az1
+    --group-id <sg-fsxn-az2> \
+    --protocol tcp --port 11105 --source-group <sg-fsxn-az1>
 
 aws ec2 authorize-security-group-ingress \
-    --group-id sg-fsxn-az2 \
-    --protocol icmp --port -1 --source-group sg-fsxn-az1
+    --group-id <sg-fsxn-az2> \
+    --protocol icmp --port -1 --source-group <sg-fsxn-az1>
 ```
 
 ### Step 4: Set Up Cluster and SVM Peering
@@ -284,16 +285,23 @@ aws ec2 authorize-security-group-ingress \
 cluster peer create -generate-passphrase -peer-addrs <az2-intercluster-lif-ip>
 
 # On AZ2 FSxN
-cluster peer create -peer-addrs <az1-intercluster-lif-ip> \
-    -passphrase <generated-passphrase>
+cluster peer create -peer-addrs <az1-intercluster-lif-ip> 
+- Enter the passphrase: <generated-passphrase>
+- Confirm the passphrase: <generated-passphrase>
 
 # SVM peering
 # On AZ1 FSxN
+# you can get <fsxn-cluster-name> from 'cluster peer show' command.
+cluster peer show
+# On AZ1 FSxN
 vserver peer create -vserver svm-primary -peer-vserver svm-cache \
-    -peer-cluster fsxn-ml-cache -applications flexcache,snapmirror
+    -peer-cluster <fsxn-cluster-name> -applications flexcache,snapmirror
 
 # On AZ2 FSxN
 vserver peer accept -vserver svm-cache -peer-vserver svm-primary
+
+# Confirm vserver peer
+vserver peer show
 ```
 
 ### Step 5: Create FlexCache Volume (AZ2)
@@ -305,7 +313,7 @@ volume flexcache create -vserver svm-cache \
     -origin-vserver svm-primary \
     -origin-volume training_data \
     -size 3t \
-    -junction-path /training-data-cache
+    -junction-path /training-data-cache -aggr-list aggr1
 ```
 
 ### Step 6: Set Up SnapMirror for Checkpoint Replication
@@ -331,7 +339,7 @@ This replicates AZ2 checkpoints to AZ1 asynchronously. You can adjust the schedu
 ```bash
 # AZ1 instances
 sudo mount -t nfs -o vers=4.1,nconnect=16,rsize=262144,wsize=262144 \
-    svm-primary.fs-xxxxx.fsx.us-east-1.aws:/training-data \
+    <svm-primary.fs-xxxxx.fsx.us-east-1.aws:/training-data> \
     /mnt/training-data
 
 sudo mount -t nfs -o vers=4.1,nconnect=16,rsize=262144,wsize=262144 \
