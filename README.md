@@ -338,21 +338,31 @@ This replicates AZ2 checkpoints to AZ1 asynchronously. You can adjust the schedu
 
 ```bash
 # AZ1 instances
+## nconnect option will provide with much faster performance
+sudo mkdir /mnt/training-data
+
 sudo mount -t nfs -o vers=4.1,nconnect=16,rsize=262144,wsize=262144 \
     <svm-primary.fs-xxxxx.fsx.us-east-1.aws:/training-data> \
     /mnt/training-data
 
+sudo mkdir /mnt/checkpoints
+
 sudo mount -t nfs -o vers=4.1,nconnect=16,rsize=262144,wsize=262144 \
-    svm-primary.fs-xxxxx.fsx.us-east-1.aws:/checkpoints-az1 \
+    <svm-primary.fs-xxxxx.fsx.us-east-1.aws:/checkpoints-az1> \
     /mnt/checkpoints
 
 # AZ2 instances
-sudo mount -t nfs -o vers=4.1,nconnect=16,rsize=262144,wsize=262144 \
-    svm-cache.fs-yyyyy.fsx.us-east-1.aws:/training-data-cache \
-    /mnt/training-data
+## /training-data-cache volume will not be shown in aws web console, you can find it with ONTAP CLI "vol show" 
+sudo mkdir /mnt/training-data
 
 sudo mount -t nfs -o vers=4.1,nconnect=16,rsize=262144,wsize=262144 \
-    svm-cache.fs-yyyyy.fsx.us-east-1.aws:/checkpoints-az2 \
+    <svm-cache.fs-yyyyy.fsx.us-east-1.aws:/training-data-cache> \
+    /mnt/training-data
+
+sudo mkdir /mnt/checkpoints
+
+sudo mount -t nfs -o vers=4.1,nconnect=16,rsize=262144,wsize=262144 \
+    <svm-cache.fs-yyyyy.fsx.us-east-1.aws:/checkpoints-az2> \
     /mnt/checkpoints
 ```
 
@@ -418,16 +428,16 @@ For ML training workloads, we choose Single-AZ FSxN with automated backups inste
 # Automated daily backups (already configured in Step 1)
 # On-demand backup before a critical training run:
 aws fsx create-backup \
-    --volume-id vol-xxxxx \
+    --volume-id <vol-xxxxx> \
     --tags Key=Purpose,Value=pre-training-backup
 
 # Restore if needed (creates a new volume on an existing file system):
 aws fsx create-volume-from-backup \
-    --backup-id backup-xxxxx \
+    --backup-id <backup-xxxxx> \
     --name training-data-restored \
     --ontap-configuration \
         JunctionPath=/training-data,SizeInMegabytes=5242880,\
-StorageVirtualMachineId=svm-xxxxx
+StorageVirtualMachineId=<svm-xxxxx>
 ```
 
 ### Recovery Scenario
