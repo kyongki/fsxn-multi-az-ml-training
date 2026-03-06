@@ -499,7 +499,7 @@ Cache hit ratio after epoch 1: typically 95%+
 
 ```bash
 # FlexCache hit ratio (ONTAP CLI on AZ2 FSxN)
-statistics show -object flexcache -counter cache_miss_percent
+statistics volume show -vserver svm-cache
 
 # SnapMirror replication lag
 snapmirror show -destination-path svm-primary:checkpoints_az2_replica \
