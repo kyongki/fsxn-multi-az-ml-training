@@ -21,64 +21,9 @@ Our architecture addresses these challenges with three key design decisions:
 
 1. **FSxN origin in AZ1 (Single-AZ)** — single source of truth for training datasets, with automated backups for resilience
 2. **FlexCache in AZ2** — sparse read cache for near-local training data access
-3. **Local checkpoint volumes in each AZ** — each AZ writes checkpoints to its own local FSxN volume, then SnapMirror replicates them back to the origin for consolidation
+3. **Local checkpoint volumes in each AZ** — each AZ writes checkpoints to its own local FSxN volume, then SnapMirror replicates AZ2's checkpoints to AZ1 for cross-AZ availability
 
-```
-┌──────────────────────────────────────────────────────────────────────────────────────┐
-│                                       VPC                                            │
-│                                                                                      │
-│  ┌────────────────────────────────────┐    ┌────────────────────────────────────┐    │
-│  │     Availability Zone 1 (Primary)  │    │    Availability Zone 2 (Secondary) │    │
-│  │                                    │    │                                    │    │
-│  │  ┌──────────────────────────────┐  │    │  ┌──────────────────────────────┐  │    │
-│  │  │  FSxN File System (AZ1)      │  │    │  │  FSxN File System (AZ2)      │  │    │
-│  │  │  Single-AZ, 2nd Gen          │  │    │  │  Single-AZ, 2nd Gen          │  │    │
-│  │  │                              │  │    │  │                              │  │    │
-│  │  │  ┌────────────────────────┐  │  │    │  │  ┌────────────────────────┐  │  │    │
-│  │  │  │  Origin Volume         │──│──│────│──│  │  FlexCache Volume      │  │  │    │
-│  │  │  │  /training-data        │  │  │    │  │  │  /training-data-cache  │  │  │    │
-│  │  │  │  (READ source of truth)│  │  │    │  │  │  (Sparse read cache)   │  │  │    │
-│  │  │  └────────────────────────┘  │  │    │  │  └────────────────────────┘  │  │    │
-│  │  │                              │  │    │  │                              │  │    │
-│  │  │  ┌────────────────────────┐  │  │    │  │  ┌────────────────────────┐  │  │    │
-│  │  │  │  Checkpoint Volume     │  │  │    │  │  │  Checkpoint Volume     │  │  │    │
-│  │  │  │  /checkpoints-az1      │  │  │    │  │  │  /checkpoints-az2      │  │  │    │
-│  │  │  │  (Local WRITE)         │  │  │    │  │  │  (Local WRITE)         │  │  │    │
-│  │  │  └──────────┬─────────────┘  │  │    │  │  └──────────┬─────────────┘  │  │    │
-│  │  │             │                │  │    │  │             │                │  │    │
-│  │  │  ┌──────────▼─────────────┐  │  │    │  │             │                │  │    │
-│  │  │  │  Consolidated          │  │◀─│────│──│─────────────┘                │  │    │
-│  │  │  │  Checkpoints           │  │  │    │  │       SnapMirror             │  │    │
-│  │  │  │  (DP volume, no mount) │  │  │    │  │  (async replication)         │  │    │
-│  │  │  └────────────────────────┘  │  │    │  │                              │  │    │
-│  │  │                              │  │    │  │                              │  │    │
-│  │  │  Automated Backups (multi-AZ  │  │    │  │  SSD (cache + checkpoints)   │  │    │
-│  │  │  durable, managed by FSxN)   │  │    │  │                              │  │    │
-│  │  └──────────────────────────────┘  │    │  └──────────────────────────────┘  │    │
-│  │                                    │    │                                    │    │
-│  │  ┌──────────────────────────────┐  │    │  ┌──────────────────────────────┐  │    │
-│  │  │  GPU Training Instances      │  │    │  │  GPU Training Instances      │  │    │
-│  │  │                              │  │    │  │                              │  │    │
-│  │  │  ┌────────┐  ┌────────┐     │  │    │  │  ┌────────┐  ┌────────┐     │  │    │
-│  │  │  │ p5.48x │  │ p5.48x │     │  │    │  │  │ p5.48x │  │ p5.48x │     │  │    │
-│  │  │  │ 8xH100 │  │ 8xH100 │     │  │    │  │  │ 8xH100 │  │ 8xH100 │     │  │    │
-│  │  │  └────────┘  └────────┘     │  │    │  │  └────────┘  └────────┘     │  │    │
-│  │  │                              │  │    │  │                              │  │    │
-│  │  │  READ:  /training-data       │  │    │  │  READ:  /training-data-cache  │  │    │
-│  │  │  WRITE: /checkpoints-az1     │  │    │  │  WRITE: /checkpoints-az2      │  │    │
-│  │  └──────────────────────────────┘  │    │  └──────────────────────────────┘  │    │
-│  │                                    │    │                                    │    │
-│  └────────────────────────────────────┘    └────────────────────────────────────┘    │
-│                                                                                      │
-│  ┌──────────────────────────────────────────────────────────────────────────────┐    │
-│  │                          Shared Services                                     │    │
-│  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌────────────────┐   │    │
-│  │  │  Amazon S3    │  │  CloudWatch  │  │  Systems Mgr │  │  AWS Backup    │   │    │
-│  │  │  (Staging)    │  │  (Metrics)   │  │  (Fleet)     │  │  (Scheduled)   │   │    │
-│  │  └──────────────┘  └──────────────┘  └──────────────┘  └────────────────┘   │    │
-│  └──────────────────────────────────────────────────────────────────────────────┘    │
-└──────────────────────────────────────────────────────────────────────────────────────┘
-```
+![Multi-AZ ML Training Architecture with FSx for NetApp ONTAP](fsxn-multi-az-architecture.png)
 
 ### Data Flow
 
@@ -97,11 +42,11 @@ AZ2 Instances ──read──▶ FlexCache Volume (local)
 WRITE PATH — Checkpoints (Key Design Decision)
 ═══════════════════════════════════════════════
 
-AZ1 Instances ──write──▶ /checkpoints-az1 (local FSxN)     [sub-ms latency] ✅
-AZ2 Instances ──write──▶ /checkpoints-az2 (local FSxN)     [sub-ms latency] ✅
+AZ1 Instances ──write──▶ /checkpoints-az1 (local FSxN)     [sub-ms latency] 
+AZ2 Instances ──write──▶ /checkpoints-az2 (local FSxN)     [sub-ms latency] 
                                 │
                                 ▼  SnapMirror (async)
-                         Origin FSxN AZ1: checkpoints_all (DP volume, consolidated)
+                         Origin FSxN AZ1: checkpoints_az2_replica (DP volume, AZ2 replica)
 
 
 RESILIENCE PATH — Backup
@@ -116,12 +61,12 @@ FSxN AZ1 ──automated daily backup──▶ Managed backup storage (multi-AZ 
 
 ### 1. FSxN Origin File System (AZ1) — Single Source of Truth
 
-The primary FSxN file system in AZ1 holds the authoritative training dataset and consolidates all checkpoints.
+The primary FSxN file system in AZ1 holds the authoritative training dataset, local AZ1 checkpoints, and a SnapMirror replica of AZ2's checkpoints.
 
 - **Deployment type**: Single-AZ (2nd generation) — maximizes throughput, lower cost than Multi-AZ
 - **Origin volume** (`/training-data`): Read-only source for training data. AZ1 instances read directly; AZ2 reads via FlexCache
 - **Checkpoint volume AZ1** (`/checkpoints-az1`): Local write target for AZ1 training instances
-- **Consolidated checkpoint volume** (`/checkpoints-all`): SnapMirror destination that receives AZ2 checkpoints. This is a data protection (DP) volume — it is read-only while the SnapMirror relationship is active. To access consolidated checkpoints for evaluation or inference, use a FlexClone (instant writable copy) or temporarily break the mirror
+- **AZ2 checkpoint replica** (`checkpoints_az2_replica`): SnapMirror destination that receives a copy of AZ2's checkpoints. This is a data protection (DP) volume — it is read-only while the SnapMirror relationship is active. To access these checkpoints for evaluation or inference, use a FlexClone (instant writable copy) or temporarily break the mirror. Note: this volume only contains AZ2 checkpoints, not AZ1's.
 - **Auto-tiering**: Cold datasets and old checkpoints automatically tier to capacity pool storage
 - **Automated backups**: Daily incremental backups stored redundantly across multiple AZs by the FSxN service (configurable retention up to 90 days)
 
@@ -139,29 +84,29 @@ A second FSxN file system in AZ2 serves two purposes:
 - SnapMirror asynchronously replicates checkpoints to the origin FSxN in AZ1
 - Training is never blocked waiting for cross-AZ writes
 
-### Accessing Consolidated Checkpoints (DP Volume Constraint)
+### Accessing AZ2 Checkpoint Replica (DP Volume Constraint)
 
-The consolidated checkpoint volume (`/checkpoints-all`) on AZ1 is a SnapMirror data protection (DP) destination — it is **read-only** while the replication relationship is active. This means you cannot directly mount it for read-write access.
+The AZ2 checkpoint replica (`checkpoints_az2_replica`) on AZ1 is a SnapMirror data protection (DP) destination — it is **read-only** while the replication relationship is active. This means you cannot directly mount it for read-write access.
 
-To access consolidated checkpoints for evaluation, inference, or resuming training:
+To access AZ2 checkpoints for evaluation, inference, or resuming training:
 
 **Option A: FlexClone (recommended)** — Create an instant, writable copy with near-zero storage overhead:
 ```bash
 # On AZ1 FSxN — create a writable clone from the DP volume
 volume clone create -vserver svm-primary \
-    -flexclone checkpoints_all_clone \
-    -parent-volume checkpoints_all \
-    -junction-path /checkpoints-all-rw
+    -flexclone checkpoints_az2_replica_clone \
+    -parent-volume checkpoints_az2_replica \
+    -junction-path /checkpoints-az2-replica-rw
 ```
 The clone is writable immediately and shares unchanged blocks with the parent — no data copy needed.
 
-> **Important**: FlexClone requires at least one SnapMirror snapshot on the DP volume. Ensure `snapmirror initialize` (Step 6) has completed before attempting to create a FlexClone. Verify with: `snapmirror show -destination-path svm-primary:checkpoints_all -fields state` (state should be `Snapmirrored`).
+> **Important**: FlexClone requires at least one SnapMirror snapshot on the DP volume. Ensure `snapmirror initialize` (Step 6) has completed before attempting to create a FlexClone. Verify with: `snapmirror show -destination-path svm-primary:checkpoints_az2_replica -fields state` (state should be `Snapmirrored`).
 
 **Option B: Break the mirror** — Convert the DP volume to read-write (stops replication):
 ```bash
-snapmirror break -destination-path svm-primary:checkpoints_all
+snapmirror break -destination-path svm-primary:checkpoints_az2_replica
 # Volume is now read-write, but replication is paused
-# To resume: snapmirror resync -destination-path svm-primary:checkpoints_all
+# To resume: snapmirror resync -destination-path svm-primary:checkpoints_az2_replica
 ```
 
 For most ML workflows, FlexClone is preferred because it doesn't interrupt ongoing SnapMirror replication.
@@ -282,10 +227,10 @@ volume create -vserver svm-primary -volume checkpoints_az1 \
     -size 1t -junction-path /checkpoints-az1 \
     -security-style unix -unix-permissions 0777
 
-# On AZ1 FSxN — Consolidated checkpoint volume (SnapMirror destination)
+# On AZ1 FSxN — AZ2 checkpoint replica volume (SnapMirror destination)
 # Note: DP volumes cannot have a junction-path at creation.
 # The volume remains unmounted until accessed via FlexClone or mirror break.
-volume create -vserver svm-primary -volume checkpoints_all \
+volume create -vserver svm-primary -volume checkpoints_az2_replica \
     -size 1t -type DP
 
 # On AZ2 FSxN — Local checkpoint volume
@@ -369,14 +314,14 @@ volume flexcache create -vserver svm-cache \
 # On AZ1 FSxN — Create SnapMirror relationship
 snapmirror create \
     -source-path svm-cache:checkpoints_az2 \
-    -destination-path svm-primary:checkpoints_all \
+    -destination-path svm-primary:checkpoints_az2_replica \
     -type XDP \
     -policy MirrorAllSnapshots \
     -schedule hourly
 
 # Initialize the relationship
 snapmirror initialize \
-    -destination-path svm-primary:checkpoints_all
+    -destination-path svm-primary:checkpoints_az2_replica
 ```
 
 This replicates AZ2 checkpoints to AZ1 asynchronously. You can adjust the schedule (e.g., every 15 minutes) based on your RPO needs.
@@ -482,8 +427,8 @@ StorageVirtualMachineId=svm-xxxxx
 ```
 AZ1 FSxN goes down during training:
 
-1. AZ2 FlexCache: cached data still readable ✅
-   AZ2 checkpoints: still writable locally ✅
+1. AZ2 FlexCache: cached data still readable 
+   AZ2 checkpoints: still writable locally 
    → AZ2 training can continue on cached data temporarily
 
 2. Restore origin from backup to a new FSxN (same or different AZ)
@@ -539,7 +484,7 @@ Cache hit ratio after epoch 1: typically 95%+
 statistics show -object flexcache -counter cache_miss_percent
 
 # SnapMirror replication lag
-snapmirror show -destination-path svm-primary:checkpoints_all \
+snapmirror show -destination-path svm-primary:checkpoints_az2_replica \
     -fields lag-time,state
 
 # Volume utilization
@@ -559,7 +504,7 @@ CloudWatch metrics to monitor:
 | SnapMirror is async — AZ2 checkpoints have replication lag | Acceptable for ML; checkpoints also exist locally in AZ2 |
 | Two FSxN file systems = two base costs | Still cheaper than Multi-AZ; cache FSxN can be smaller |
 | FlexCache cold start penalty on epoch 1 | Pre-warm cache by running a read pass before training |
-| Consolidated checkpoint volume is read-only (DP) | Use FlexClone for writable access without breaking replication |
+| AZ2 checkpoint replica volume is read-only (DP) | Use FlexClone for writable access without breaking replication |
 | Cross-AZ distributed training (NCCL AllReduce) latency | Storage architecture doesn't solve GPU-to-GPU communication; consider keeping gradient sync within AZ where possible |
 | FlexCache not ideal for frequently changing training data | Best for static datasets; for online learning, consider alternatives |
 
@@ -573,7 +518,7 @@ AZ1 (Primary)              AZ2                        AZ3
 │ FSxN             │   │ FSxN             │   │ FSxN             │
 │ - Origin volume  │◀──│ - FlexCache      │   │ - FlexCache ─────│──▶ AZ1 Origin
 │ - Checkpoints-1  │   │ - Checkpoints-2  │   │ - Checkpoints-3  │
-│ - Consolidated   │◀──│   (SnapMirror)   │   │   (SnapMirror) ──│──▶ AZ1
+│ - AZ2 replica    │◀──│   (SnapMirror)   │   │   (SnapMirror) ──│──▶ AZ1
 │   (DP volume)    │   │                  │   │                  │
 └──────────────────┘   └──────────────────┘   └──────────────────┘
 ```
@@ -607,7 +552,7 @@ By combining Amazon FSx for NetApp ONTAP with FlexCache for read caching and loc
 - **Single source of truth** for training data with no sync complexity
 - **Near-local read performance** in both AZs (FlexCache warms after epoch 1)
 - **Local-speed checkpoint writes** in both AZs (no cross-AZ write penalty)
-- **Asynchronous checkpoint consolidation** via SnapMirror to the origin
+- **Asynchronous checkpoint replication** via SnapMirror — AZ2 checkpoints are replicated to AZ1 for cross-AZ availability (AZ1 checkpoints remain local)
 - **Cost-effective resilience** through automated backups instead of Multi-AZ replication
 - **Identical training scripts** across AZs — no application-level changes
 
