@@ -175,7 +175,7 @@ aws fsx create-file-system \
     --subnet-ids subnet-az1-xxxxx \
     --ontap-configuration '{
         "DeploymentType": "SINGLE_AZ_2",
-        "ThroughputCapacityPerHAPair": 128,
+        "ThroughputCapacityPerHAPair": 384,
         "PreferredSubnetId": "subnet-az1-xxxxx",
         "AutomaticBackupRetentionDays": 7,
         "DailyAutomaticBackupStartTime": "05:00"
@@ -189,7 +189,7 @@ aws fsx create-file-system \
     --subnet-ids subnet-az2-yyyyy \
     --ontap-configuration '{
         "DeploymentType": "SINGLE_AZ_2",
-        "ThroughputCapacityPerHAPair": 128,
+        "ThroughputCapacityPerHAPair": 384,
         "PreferredSubnetId": "subnet-az2-yyyyy",
         "AutomaticBackupRetentionDays": 3
     }' \
